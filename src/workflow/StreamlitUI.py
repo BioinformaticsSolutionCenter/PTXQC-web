@@ -24,8 +24,14 @@ from src.workflow._log_status import classify_log_outcome
 
 
 def _mounted_data_root() -> Union[Path, None]:
-    """Return the validated mount root from LOCAL_DATA_DIR, or None."""
-    raw = os.environ.get("LOCAL_DATA_DIR", "").strip()
+    """Return the validated mount root from the ``local_data_dir`` setting.
+
+    The browser renders only when that path resolves to an existing
+    directory inside the container, i.e. when a host volume is actually
+    mounted there.
+    """
+    settings = st.session_state.get("settings") or {}
+    raw = (settings.get("local_data_dir") or "").strip()
     if not raw:
         return None
     try:
@@ -265,7 +271,15 @@ class StreamlitUI:
             with c2:
                 self._mounted_drive_browser(key, name, file_types, files_dir, mount_root)
 
-        if fallback and not any([f for f in Path(files_dir).iterdir() if f.name != "external_files.txt"]):
+        external_files_path = Path(files_dir, "external_files.txt")
+        has_real_files = any(
+            p.name != "external_files.txt" for p in files_dir.iterdir()
+        )
+        has_external_picks = external_files_path.exists() and any(
+            line.strip() and os.path.exists(line.strip())
+            for line in external_files_path.read_text().splitlines()
+        )
+        if fallback and not has_real_files and not has_external_picks:
             if isinstance(fallback, str):
                 fallback = [fallback]
             for f in fallback:
