@@ -47,6 +47,13 @@ RUN wget -q \
     && rm -f Miniforge3-Linux-x86_64.sh
 RUN mamba --version
 
+# Make /root traversable so the entrypoint can `source
+# /root/miniforge3/bin/activate ...` when the container runs as a non-root
+# user (apptainer/singularity maps the host UID into the container; the
+# default ubuntu /root is 0700 which would block path traversal). +x only,
+# not +r, so the directory listing remains private.
+RUN chmod o+x /root
+
 # Setup mamba environment.
 RUN mamba create -n streamlit-env python=3.10
 RUN echo "mamba activate streamlit-env" >> ~/.bashrc
@@ -122,6 +129,21 @@ FROM compile-openms AS run-app
 RUN apt-get update && apt-get install -y --no-install-recommends redis-server nginx \
     && rm -rf /var/lib/apt/lists/*
 
+# Create Redis data directory. Default 0755 root-owned is enough: the docker
+# entrypoint runs as root (can write regardless of mode), and the apptainer
+# entrypoint relocates Redis state to /tmp/openms-runtime-* so this dir is
+# never written under apptainer.
+RUN mkdir -p /var/lib/redis
+
+# Pre-create bind-mount targets so apptainer/singularity has a real attach
+# point. Docker auto-creates missing `-v` targets, but singularity uses a
+# read-only underlay and silently ignores `:rw` when the target isn't a
+# real directory in the SIF — writes then fail with EROFS even though the
+# host bind path is writable. Pre-creating these directories costs one
+# inode each and changes nothing in docker mode (the user's volume mount
+# shadows them).
+RUN mkdir -p /workspaces-streamlit-template /mounted-data
+
 # Create workdir and copy over all streamlit related files/folders.
 
 # note: specifying folder with slash as suffix and repeating the folder name seems important to preserve directory structure
@@ -154,11 +176,10 @@ ENV REDIS_URL=redis://localhost:6379/0
 # Set to >1 to enable nginx load balancer with multiple Streamlit instances
 ENV STREAMLIT_SERVER_COUNT=1
 
-# Entrypoint starts cron, Redis, RQ workers, and Streamlit. Written so the
-# container runs under both Docker and Apptainer/Singularity - see comments
-# in entrypoint.sh for the runtime-dir trick that handles Apptainer's
-# read-only rootfs.
-COPY entrypoint.sh /app/entrypoint.sh
+# Install the apptainer-compatible entrypoint that starts cron (when the root
+# FS is writable), Redis, RQ workers, optional nginx load balancer, and the
+# Streamlit server. The script falls back to /tmp paths under apptainer.
+COPY docker/entrypoint.sh /app/entrypoint.sh
 RUN chmod +x /app/entrypoint.sh
 
 # Patch Analytics
