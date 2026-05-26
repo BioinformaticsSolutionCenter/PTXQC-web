@@ -555,9 +555,6 @@ jobs:
           name: openms-streamlit-${{ matrix.variant }}-${{ matrix.arch }}-image
           path: /tmp
 
-      - name: Load image into local docker
-        run: docker load -i /tmp/image.tar
-
       - name: Create kind cluster
         uses: helm/kind-action@v1
         with:
@@ -565,7 +562,13 @@ jobs:
           config: .github/kind-config.yaml
 
       - name: Load image into kind cluster
-        run: kind load docker-image openms-streamlit:test --name test-cluster
+        # Use `kind load image-archive` (not docker-image) so we never store
+        # the image in host docker. Saves ~5-8 GB on /var/lib/docker. Delete
+        # the tar afterwards to free the same again on /tmp — the image is
+        # now in both kind nodes' containerd, which is enough.
+        run: |
+          kind load image-archive /tmp/image.tar --name test-cluster
+          rm -f /tmp/image.tar
 
       - name: Install nginx ingress controller
         run: |
@@ -687,9 +690,6 @@ jobs:
           name: openms-streamlit-${{ matrix.variant }}-${{ matrix.arch }}-image
           path: /tmp
 
-      - name: Load image into local docker
-        run: docker load -i /tmp/image.tar
-
       - name: Create kind cluster
         uses: helm/kind-action@v1
         with:
@@ -697,7 +697,13 @@ jobs:
           config: .github/kind-config.yaml
 
       - name: Load image into kind cluster
-        run: kind load docker-image openms-streamlit:test --name traefik-test
+        # Use `kind load image-archive` (not docker-image) so we never store
+        # the image in host docker. Saves ~5-8 GB on /var/lib/docker. Delete
+        # the tar afterwards to free the same again on /tmp — the image is
+        # now in both kind nodes' containerd, which is enough.
+        run: |
+          kind load image-archive /tmp/image.tar --name traefik-test
+          rm -f /tmp/image.tar
 
       - name: Set up Helm
         uses: azure/setup-helm@v4
