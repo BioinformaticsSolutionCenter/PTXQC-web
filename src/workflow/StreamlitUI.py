@@ -72,6 +72,7 @@ class StreamlitUI:
         file_types: Union[str, List[str]],
         name: str = "",
         fallback: Union[List, str] = None,
+        directory: bool = False,
     ) -> None:
         """
         Handles file uploads through the Streamlit interface, supporting both direct
@@ -128,7 +129,9 @@ class StreamlitUI:
 
                 files = st.file_uploader(
                     f"{name}",
-                    accept_multiple_files=(st.session_state.location == "local"),
+                    accept_multiple_files=(
+                        "directory" if directory else (st.session_state.location == "local")
+                    ),
                     type=file_type_for_uploader,
                     label_visibility="collapsed",
                 )
@@ -140,11 +143,13 @@ class StreamlitUI:
                         if not isinstance(files, list):
                             files = [files]
                         for f in files:
+                            # Directory uploads carry a relative path in f.name; store flat.
+                            fname = Path(f.name).name
                             # Check if file type is in the list of accepted file types
-                            if f.name not in [
-                                f.name for f in files_dir.iterdir()
-                            ] and any(f.name.endswith(ft) for ft in file_types):
-                                with open(Path(files_dir, f.name), "wb") as fh:
+                            if fname not in [
+                                p.name for p in files_dir.iterdir()
+                            ] and any(fname.endswith(ft) for ft in file_types):
+                                with open(Path(files_dir, fname), "wb") as fh:
                                     fh.write(f.getbuffer())
                         st.success("Successfully added uploaded files!")
                     else:

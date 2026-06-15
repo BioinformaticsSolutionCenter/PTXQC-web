@@ -34,6 +34,35 @@ RUN (type -p wget >/dev/null || (apt-get update && apt-get install wget -y)) \
 	&& apt-get update \
 	&& apt-get install gh -y
 
+#################################### install R + PTXQC
+# PTXQC is an R package; this app calls it as a subprocess (src/ptxqc_runner.R).
+# We add a recent R (CRAN apt repo) + the system libraries its dependencies need
+# + pandoc (for the rmarkdown HTML report), then install PTXQC and its deps.
+# NOTE: this needs outbound network access at build time (build in CI, not on a
+# network-blocked host).
+# DEBIAN_FRONTEND + a pre-seeded timezone keep the r-base/tzdata install
+# non-interactive (otherwise tzdata stalls the build on a "Geographic area:" prompt).
+RUN export DEBIAN_FRONTEND=noninteractive \
+	&& ln -snf /usr/share/zoneinfo/Etc/UTC /etc/localtime && echo "Etc/UTC" > /etc/timezone \
+	&& apt-get install -y --no-install-recommends software-properties-common dirmngr gnupg \
+	&& wget -qO- https://cloud.r-project.org/bin/linux/ubuntu/marutter_pubkey.asc | tee /etc/apt/trusted.gpg.d/cran_ubuntu_key.asc > /dev/null \
+	&& add-apt-repository -y "deb https://cloud.r-project.org/bin/linux/ubuntu jammy-cran40/" \
+	&& apt-get update \
+	&& apt-get install -y --no-install-recommends \
+		r-base r-base-dev pandoc \
+		libcairo2-dev libxml2-dev libssl-dev libcurl4-openssl-dev \
+		libfontconfig1-dev libharfbuzz-dev libfribidi-dev \
+		libfreetype6-dev libpng-dev libtiff5-dev libjpeg-dev
+
+# Install PTXQC + all its dependencies as precompiled binaries from Posit Public
+# Package Manager (the HTTPUserAgent header makes PPM serve Ubuntu-jammy binaries
+# instead of source — far faster than compiling the dependency tree). jsonlite +
+# yaml are used by src/ptxqc_runner.R. Falls back to source if a binary is absent.
+RUN Rscript -e 'options(repos = c(PPM = "https://packagemanager.posit.co/cran/__linux__/jammy/latest")); \
+	options(HTTPUserAgent = sprintf("R/%s R (%s)", getRversion(), paste(getRversion(), R.version$platform, R.version$arch, R.version$os))); \
+	install.packages(c("PTXQC", "jsonlite", "yaml")); \
+	if (!requireNamespace("PTXQC", quietly = TRUE)) { quit(status = 1) }'
+
 # Download and install miniforge.
 ENV PATH="/root/miniforge3/bin:${PATH}"
 RUN wget -q \
@@ -102,7 +131,9 @@ ENV STREAMLIT_SERVER_COUNT=1
 # The script auto-skips the Redis/RQ section when redis-server is not
 # installed, so it works equally well in the simple variant.
 COPY docker/entrypoint.sh /app/entrypoint.sh
-RUN chmod +x /app/entrypoint.sh
+# Strip CRs so the script runs even when the image is built from a Windows
+# checkout (CRLF in the shebang would otherwise make exec fail at runtime).
+RUN sed -i 's/\r$//' /app/entrypoint.sh && chmod +x /app/entrypoint.sh
 
 # Patch Analytics
 RUN mamba run -n streamlit-env python hooks/hook-analytics.py

@@ -10,33 +10,24 @@ if "settings" not in st.session_state:
 
 if __name__ == '__main__':
     pages = {
-        str(st.session_state.settings["app-name"]) : [
-            st.Page(Path("content", "quickstart.py"), title="Quickstart", icon="👋"),
-            st.Page(Path("content", "documentation.py"), title="Documentation", icon="📖"),
+        str(st.session_state.settings["app-name"]): [
+            st.Page(Path("content", "ptxqc_upload.py"), title="Upload Data", icon="📁"),
+            st.Page(Path("content", "ptxqc_configure.py"), title="Configure", icon="⚙️"),
+            st.Page(Path("content", "ptxqc_run.py"), title="Create Report", icon="🚀"),
+            st.Page(Path("content", "ptxqc_results.py"), title="Report", icon="📊"),
         ],
-        "pyOpenMS Toolbox": [
-            st.Page(Path("content", "digest.py"), title="In Silico Digest", icon="✂️"),
-            st.Page(Path("content", "peptide_mz_calculator.py"), title="m/z Calculator", icon="⚖️"),
-            st.Page(Path("content", "isotope_pattern_generator.py"), title="Isotopic Pattern Calculator", icon="📶"),
-            st.Page(Path("content", "fragmentation.py"), title="Fragment Ion Generation", icon="💥"),
+        "Info": [
+            st.Page(Path("content", "help.py"), title="Help", icon="❓"),
+            st.Page(Path("content", "about.py"), title="About", icon="ℹ️"),
         ],
-        "TOPP Workflow Framework": [
-            st.Page(Path("content", "topp_workflow_file_upload.py"), title="File Upload", icon="📁"),
-            st.Page(Path("content", "topp_workflow_parameter.py"), title="Configure", icon="⚙️"),
-            st.Page(Path("content", "topp_workflow_execution.py"), title="Run", icon="🚀"),
-            st.Page(Path("content", "topp_workflow_results.py"), title="Results", icon="📊"),
-        ],
-        "pyOpenMS Workflow" : [
-            st.Page(Path("content", "file_upload.py"), title="File Upload", icon="📂"),
-            st.Page(Path("content", "raw_data_viewer.py"), title="View MS data", icon="👀"),
-            st.Page(Path("content", "run_example_workflow.py"), title="Run Workflow", icon="⚙️"),
-            st.Page(Path("content", "download_section.py"), title="Download Results", icon="⬇️"),
-        ],
-        "Others Topics": [
-            st.Page(Path("content", "simple_workflow.py"), title="Simple Workflow", icon="⚙️"),
-            st.Page(Path("content", "run_subprocess.py"), title="Run Subprocess", icon="🖥️"),
-        ]
     }
+
+    # Hidden admin usage-log page, revealed via the ?logfile URL query
+    # (parity with the original PTXQC-web app).
+    if "logfile" in st.query_params:
+        pages["Admin"] = [
+            st.Page(Path("content", "logfile.py"), title="Logfile", icon="📦"),
+        ]
 
     pg = st.navigation(pages)
     pg.run()

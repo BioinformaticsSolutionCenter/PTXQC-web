@@ -1,123 +1,283 @@
-import streamlit as st
-from src.workflow.WorkflowManager import WorkflowManager
+"""PTXQC report workflow.
 
-# for result section:
+A WorkflowManager subclass that wraps the PTXQC R package as a thin subprocess
+tool (``src/ptxqc_runner.R``) to reproduce the PTXQC-web R-Shiny app on top of the
+OpenMS streamlit-template. The four sections (upload / configure / run / results)
+map onto the original app's single-screen flow.
+"""
+
+import os
+import json
+import shutil
 from pathlib import Path
-import pandas as pd
-import plotly.express as px
-from src.common.common import show_fig
+
+import streamlit as st
+import streamlit.components.v1 as components
+
+from src.workflow.WorkflowManager import WorkflowManager
+from src import ptxqc_config as cfg
+
+# Map the data-type selector to (input-files key, accepted extensions, upload mode).
+INPUT_TYPES = {
+    "MaxQuant directory": ("txt-files", ["txt", "xml"], "directory"),
+    "MaxQuant files": ("txt-files", ["txt", "xml"], "multi"),
+    "mzTab file": ("mztab-file", ["mzTab"], "single"),
+}
+
+# Advanced-settings widgets: (key, default, label, help). Mirrors PTXQC-web
+# app/server.R adv.set1/2/3. Numeric type follows the default's Python type.
+NUMBER_WIDGETS = [
+    ("id_rate_bad", 20, "ID rate – bad threshold (%)", "MS/MS identification rate below which a Raw file is flagged.", 0, 100),
+    ("id_rate_great", 35, "ID rate – great threshold (%)", "MS/MS identification rate above which a Raw file is considered great.", 0, 100),
+    ("pg_ratioLabIncThresh", 4, "Protein groups: label incorporation", "Threshold for label incorporation ratio.", None, None),
+    ("param_PG_intThresh", 25, "Protein groups: log2-intensity", "Target threshold for protein intensities.", None, None),
+    ("param_EV_protThresh", 3500, "Evidence: protein count", "Target threshold for protein counts (also used as the evidence intensity threshold, as in PTXQC-web).", None, None),
+    ("param_EV_pepThresh", 15000, "Evidence: peptide count", "Target threshold for peptide counts.", None, None),
+    ("param_EV_MatchingTolerance", 0.7, "Evidence: matching time window [min]", "Match-between-runs matching tolerance (MaxQuant parameter).", None, None),
+    ("param_EV_PrecursorTolPPM", 20, "Evidence: first search tol [ppm]", "Uncalibrated mass error tolerance (MaxQuant parameter).", None, None),
+    ("param_EV_PrecursorOutOfCalSD", 2, "Evidence: out-of-cal warn SD", "Max standard deviation for the uncalibrated mass error distribution [ppm].", None, None),
+    ("param_EV_PrecursorTolPPMmainSearch", 4.5, "Evidence: main search tol [ppm]", "Calibrated mass error tolerance (MaxQuant parameter).", None, None),
+    ("param_MSMSScans_ionInjThresh", 10, "MS/MS scans: ion injection time [ms]", "Threshold for ion injection time.", None, None),
+]
 
 
 class Workflow(WorkflowManager):
-    # Setup pages for upload, parameter, execution and results.
-    # For layout use any streamlit components such as tabs (as shown in example), columns, or even expanders.
     def __init__(self) -> None:
-        # Initialize the parent class with the workflow name.
-        super().__init__("TOPP Workflow", st.session_state["workspace"])
+        super().__init__("PTXQC", st.session_state["workspace"])
+        # Replace the OpenMS-specific "method summary" (which shells out to FileFilter
+        # and emits OpenMS citation text) with a PTXQC-appropriate one.
+        self.ui.export_parameters_markdown = self._method_summary
 
+    # ----- helpers -------------------------------------------------------
+    def _pk(self, key: str) -> str:
+        """Session-state key the ParameterManager uses for a custom widget."""
+        return f"{self.parameter_manager.param_prefix}{key}"
+
+    def _workspaces_root(self) -> Path:
+        env = os.environ.get("WORKSPACES_DIR")
+        return Path(env) if env else self.workflow_dir.parent.parent
+
+    def _method_summary(self) -> str:
+        meta = cfg.get_ptxqc_metadata()
+        md = [
+            f"QC reports were generated with **PTXQC** (version {meta.get('version', '?')}) "
+            "via the [PTXQC web application](https://github.com/cbielow/PTXQC). "
+            "Non-default parameters are listed below.\n",
+            self.ui.non_default_params_summary(),
+        ]
+        return "\n".join(md)
+
+    def _gather_files(self, files_dir: Path) -> list[str]:
+        """Return absolute paths of input files in a workspace upload dir,
+        including in-place (external_files.txt) references that still exist."""
+        out: list[str] = []
+        if files_dir.exists():
+            out += [str(f) for f in files_dir.iterdir() if f.name != "external_files.txt"]
+        ext = files_dir / "external_files.txt"
+        if ext.exists():
+            out += [line.strip() for line in ext.read_text().splitlines()
+                    if line.strip() and os.path.exists(line.strip())]
+        return out
+
+    # ----- sections ------------------------------------------------------
     def upload(self) -> None:
-        t = st.tabs(["MS data"])
-        with t[0]:
-            # Use the upload method from StreamlitUI to handle mzML file uploads.
-            self.ui.upload_widget(
-                key="mzML-files",
-                name="MS data",
-                file_types="mzML",
-                fallback=[str(f) for f in Path("example-data", "mzML").glob("*.mzML")],
+        self.ui.input_widget(
+            "input-type",
+            default="MaxQuant directory",
+            name="Data type",
+            widget_type="selectbox",
+            options=list(INPUT_TYPES.keys()),
+            reactive=True,
+            help="MaxQuant directory: upload a whole txt folder. "
+                 "MaxQuant files: upload individual .txt files. "
+                 "mzTab file: a single OpenMS .mzTab file.",
+        )
+        selected = st.session_state.get(self._pk("input-type"), "MaxQuant directory")
+        key, ftypes, mode = INPUT_TYPES[selected]
+
+        if mode == "directory":
+            st.info(
+                "Select your MaxQuant **txt** folder — your browser uploads its files "
+                "and only the PTXQC-relevant ones (Evidence, msms, summary, parameters, "
+                "proteinGroups, msmsScans, mqpar.xml) are used."
             )
+            self.ui.upload_widget(key=key, name="MaxQuant txt folder", file_types=ftypes, directory=True)
+        elif mode == "multi":
+            self.ui.upload_widget(key=key, name="MaxQuant txt files", file_types=ftypes)
+        else:
+            self.ui.upload_widget(key=key, name="mzTab file", file_types=ftypes)
 
     @st.fragment
     def configure(self) -> None:
-        # Allow users to select mzML files for the analysis.
-        self.ui.select_input_file("mzML-files", multiple=True)
-
-        # Create tabs for different analysis steps.
-        t = st.tabs(
-            ["**Feature Detection**", "**Feature Linking**", "**Python Custom Tool**"]
-        )
-        with t[0]:
-            # Parameters for FeatureFinderMetabo TOPP tool.
-            self.ui.input_TOPP(
-                "FeatureFinderMetabo",
-                custom_defaults={"algorithm:common:noise_threshold_int": 1000.0},
+        meta = cfg.get_ptxqc_metadata()
+        if not meta["available"]:
+            st.warning(
+                "PTXQC (R) is not available in this environment, so the live metric "
+                "list and config preview are disabled. Reports will still use sensible "
+                "defaults when run in the full (Docker) image."
             )
-        with t[1]:
-            # Parameters for MetaboliteAdductDecharger TOPP tool.
-            self.ui.input_TOPP("FeatureLinkerUnlabeledKD")
-        with t[2]:
-            # A single checkbox widget for workflow logic.
-            self.ui.input_widget("run-python-script", False, "Run custom Python script")
-            # Generate input widgets for a custom Python tool, located at src/python-tools.
-            # Parameters are specified within the file in the DEFAULTS dictionary.
-            self.ui.input_python("example")
 
-    def execution(self) -> None:
-        # Any parameter checks, here simply checking if mzML files are selected
-        if not self.params["mzML-files"]:
-            self.logger.log("ERROR: No mzML files selected.")
+        use_yaml = st.checkbox(
+            "Upload a PTXQC YAML config instead of setting parameters manually",
+            key="ptxqc-use-yaml",
+        )
+
+        if use_yaml:
+            self.ui.upload_widget(key="yaml-config", name="PTXQC YAML config", file_types=["yaml", "yml"])
             return
 
-        # Get mzML files with FileManager
-        in_mzML = self.file_manager.get_files(self.params["mzML-files"])
+        st.markdown("##### Advanced settings")
+        cols = st.columns(3)
+        for i, (key, default, label, help_text, lo, hi) in enumerate(NUMBER_WIDGETS):
+            with cols[i % 3]:
+                self.ui.input_widget(
+                    key, default=default, name=label, help=help_text,
+                    widget_type="number", min_value=lo, max_value=hi,
+                    step_size=(0.1 if isinstance(default, float) else 1),
+                )
+        # Match between runs (selectbox)
+        self.ui.input_widget(
+            "param_evd_mbr", default="auto", name="Evidence: match between runs",
+            widget_type="selectbox", options=["yes", "no", "auto"],
+            help="Whether match-between-runs should be used (auto = heuristic).",
+        )
+        # Contaminants free-text (NAME: percent; ...)
+        self.ui.input_widget(
+            "contaminants", default="MYCOPLASMA: 1", name="Contaminants (NAME: %, ';'-separated)",
+            widget_type="text",
+            help="Additional contaminants to plot, e.g. 'MYCOPLASMA: 1; ECOLI: 2'. Enter 'no' to disable.",
+        )
+        # QC metrics (dynamic list from the installed PTXQC version)
+        metric_ids = [m["id"] for m in meta["metrics"]]
+        if metric_ids:
+            self.ui.input_widget(
+                "metrics", default=metric_ids, name="Compute metrics",
+                widget_type="multiselect", options=metric_ids,
+                help="QC metrics to compute. All are enabled by default.",
+            )
 
-        # Log any messages.
-        self.logger.log(f"Number of input mzML files: {len(in_mzML)}")
+    def execution(self) -> bool:
+        params = self.params
+        selected = params.get("input-type", "MaxQuant directory")
+        key, _ftypes, mode = INPUT_TYPES[selected]
 
-        # Prepare output files for feature detection.
-        out_ffm = self.file_manager.get_files(
-            in_mzML, "featureXML", "feature-detection"
+        in_files = self._gather_files(Path(self.workflow_dir, "input-files", key))
+        if not in_files:
+            self.logger.log("ERROR: No input files provided.")
+            raise RuntimeError("No input files provided.")
+
+        # Stage inputs into the results dir; PTXQC writes its outputs alongside them.
+        rundir = Path(self.workflow_dir, "results", "qc-report")
+        rundir.mkdir(parents=True, exist_ok=True)
+        for f in in_files:
+            shutil.copy(f, rundir / Path(f).name)
+
+        # Optional uploaded YAML config overrides the manual settings.
+        uploaded_yaml = self._gather_files(Path(self.workflow_dir, "input-files", "yaml-config"))
+        uploaded_yaml = uploaded_yaml[0] if uploaded_yaml else None
+
+        contaminants = cfg.parse_contaminants(params.get("contaminants", ""))
+        run_cfg = cfg.build_run_config(
+            params, params.get("metrics", []), contaminants, uploaded_yaml
+        )
+        cfg_path = Path(self.workflow_dir, "ptxqc_run_config.json")
+        cfg_path.write_text(json.dumps(run_cfg), encoding="utf-8")
+
+        if mode == "single":
+            in_arg = str(rundir / Path(in_files[0]).name)
+            rtype = "mztab"
+        else:
+            in_arg = str(rundir)
+            rtype = "maxquant"
+
+        size_mb = sum(os.path.getsize(f) for f in in_files) / 1e6
+        self.logger.log(f"Generating PTXQC report for {len(in_files)} input file(s) ({selected})...")
+        ok = self.executor.run_command(
+            ["Rscript", cfg.RUNNER, "run",
+             "--config", str(cfg_path), "--in", in_arg, "--type", rtype, "--out", str(rundir)]
         )
 
-        # Run FeatureFinderMetabo tool with input and output files.
-        self.logger.log("Detecting features...")
-        self.executor.run_topp(
-            "FeatureFinderMetabo", input_output={"in": in_mzML, "out": out_ffm}
-        )
+        # Read version/error written by the R wrapper (best effort).
+        version, error = "unknown", ""
+        result_file = rundir / "ptxqc_result.json"
+        if result_file.exists():
+            try:
+                res = json.loads(result_file.read_text())
+                version = res.get("version", "unknown")
+                error = res.get("error") or ""
+            except (ValueError, OSError):
+                pass
+        if not ok and not error:
+            error = "PTXQC createReport failed (see log)."
 
-        # Prepare input and output files for feature linking
-        in_fl = self.file_manager.get_files(out_ffm, collect=True)
-        out_fl = self.file_manager.get_files(
-            "feature_matrix.consensusXML", set_results_dir="feature-linking"
-        )
+        # Per-report usage log (parity with PTXQC-web's persisted logfile).
+        cfg.append_usage_log(self._workspaces_root(), version, selected, size_mb, error)
 
-        # Run FeatureLinkerUnlabaeledKD with all feature maps passed at once
-        self.logger.log("Linking features...")
-        self.executor.run_topp(
-            "FeatureLinkerUnlabeledKD", input_output={"in": in_fl, "out": out_fl}
-        )
-        self.logger.log("Exporting consensus features to pandas DataFrame...")
-        self.executor.run_python(
-            "export_consensus_feature_df", input_output={"in": out_fl[0]}
-        )
-        # Check if adduct detection should be run.
-        if self.params["run-python-script"]:
-            # Example for a custom Python tool, which is located in src/python-tools.
-            self.executor.run_python("example", {"in": in_mzML})
+        if not ok or error:
+            raise RuntimeError(error or "PTXQC createReport failed.")
+        return True
 
     @st.fragment
     def results(self) -> None:
-        @st.fragment
-        def show_consensus_features():
-            df = pd.read_csv(file, sep="\t", index_col=0)
-            st.metric("number of consensus features", df.shape[0])
-            c1, c2 = st.columns(2)
-            rows = c1.dataframe(df, selection_mode="multi-row", on_select="rerun")[
-                "selection"
-            ]["rows"]
-            if rows:
-                df = df.iloc[rows, 4:]
-                fig = px.bar(df, barmode="group", labels={"value": "intensity"})
-                with c2:
-                    show_fig(fig, "consensus-feature-intensities")
-            else:
-                st.info(
-                    "💡 Select one ore more rows in the table to show a barplot with intensities."
-                )
+        rundir = Path(self.workflow_dir, "results", "qc-report")
+        result_file = rundir / "ptxqc_result.json"
+        if not result_file.exists():
+            st.info("No report yet. Upload data, configure settings, then run the workflow.")
+            return
+        try:
+            res = json.loads(result_file.read_text())
+        except (ValueError, OSError):
+            st.error("Could not read the report result. Please re-run the workflow.")
+            return
 
-        file = Path(
-            self.workflow_dir, "results", "feature-linking", "feature_matrix.tsv"
-        )
-        if file.exists():
-            show_consensus_features()
-        else:
-            st.warning("No consensus feature file found. Please run workflow first.")
+        if res.get("error"):
+            st.error(
+                f"PTXQC reported an error: {res['error']}\n\n"
+                "Please contact the PTXQC authors: https://github.com/cbielow/PTXQC"
+            )
+
+        html_path = res.get("html")
+        if html_path and Path(html_path).exists():
+            report_html = Path(html_path).read_text(encoding="utf-8", errors="replace")
+            st.caption(
+                "Interactive QC report below. Use **⤢ Open in a new tab** (top-right of the "
+                "report) or the **HTML report** download to view it full-screen."
+            )
+            # The PTXQC report is a self-contained HTML document, so embed it directly.
+            # (Streamlit static serving returns text/plain + nosniff for .html, which makes
+            # browsers show the source instead of rendering it — both in-page and in a new
+            # tab — so a served URL is not usable here.) A small injected button pops the
+            # rendered report into a new browser tab via a blob: URL.
+            popout = """
+<script>
+(function () {
+  var b = document.createElement('button');
+  b.textContent = '⤢ Open in a new tab';
+  b.style.cssText = 'position:fixed;top:8px;right:8px;z-index:99999;padding:6px 10px;'
+    + 'font:14px sans-serif;cursor:pointer;background:#29379b;color:#fff;'
+    + 'border:none;border-radius:6px;';
+  b.onclick = function () {
+    var blob = new Blob([document.documentElement.outerHTML], {type: 'text/html'});
+    window.open(URL.createObjectURL(blob), '_blank');
+  };
+  document.body.appendChild(b);
+})();
+</script>
+"""
+            components.html(report_html + popout, height=900, scrolling=True)
+
+        st.markdown("##### Downloads")
+        d_cols = st.columns(4)
+        for col, (label, path) in zip(d_cols, [
+            ("PDF report", res.get("pdf")),
+            ("HTML report", res.get("html")),
+            ("YAML config", res.get("yaml")),
+            ("Log file", res.get("log")),
+        ]):
+            if path and Path(path).exists():
+                with open(path, "rb") as f:
+                    col.download_button(label, f, file_name=Path(path).name, use_container_width=True)
+
+        if st.button("Create new report"):
+            shutil.rmtree(rundir, ignore_errors=True)
+            st.rerun()
