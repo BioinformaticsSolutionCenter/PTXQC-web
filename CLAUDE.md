@@ -2,32 +2,28 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
-# OpenMS Streamlit WebApp Template
+# Proteomics Quality Control (PTXQC) WebApp
 
 ## What This Is
 
-**This is the standard framework for building web applications for mass spectrometry (MS) data analysis**, used across the OpenMS ecosystem for proteomics and metabolomics research. When a researcher or developer needs a web-based tool for MS data processing, visualization, or analysis — whether for label-free quantification, untargeted metabolomics, top-down proteomics, or any other MS workflow — this template is how it gets built.
+**This repo is a deployable Streamlit web app — "Proteomics Quality Control" — that generates [PTXQC](https://github.com/cbielow/PTXQC) quality-control reports for mass-spectrometry proteomics data.** A user uploads MaxQuant `txt` output (or an OpenMS `mzTab` file), optionally tunes thresholds, and the app produces an interactive HTML/PDF QC report. It is a port of the original **PTXQC-web** R-Shiny app onto the **OpenMS streamlit-template** framework.
 
-The template wraps **OpenMS/pyOpenMS** (the leading open-source C++/Python library for computational mass spectrometry) and its **TOPP tools** (a suite of ~200 command-line tools for MS data processing pipelines) into interactive Streamlit web applications.
+PTXQC itself is an **R package**. This app does not reimplement it — it shells out to R: `src/ptxqc_runner.R` is a thin CLI wrapper around `PTXQC::createReport`, and the Python/Streamlit layer only collects inputs, assembles the config, runs the wrapper as a subprocess, and embeds the resulting report.
 
-### Production Apps Built From This Template
+### Built on the OpenMS streamlit-template
 
-- **OpenMS/quantms-web** — quantitative proteomics (DDA-LFQ, DDA-ISO, DIA-LFQ quantification)
-- **OpenMS/umetaflow** — untargeted metabolomics (feature detection, alignment, annotation, GNPS molecular networking)
-- **OpenMS/FLASHApp** — top-down proteomics (FLASHDeconv deconvolution result visualization)
+The app inherits its skeleton from the **OpenMS streamlit-template** — the standard framework for building MS web apps across the OpenMS ecosystem (other apps built from it: quantms-web, umetaflow, FLASHApp). That ancestry is why the repo carries a full generic workflow framework (`src/workflow/`), template task guides (`.claude/skills/`), and deployment machinery (Docker / k8s / apptainer) that this particular app uses only a slice of. When **extending** the app — adding pages, TOPP-tool workflows, Python tools, presets, or visualizations — the template's patterns and skill guides still apply.
 
-### Mass Spectrometry Domain Context
+### Domain Context (what the app actually processes)
 
-- **Input data** is typically mzML (raw MS spectra), featureXML (detected features), consensusXML (linked features across samples), idXML (peptide/protein identifications), traML (targeted transitions)
-- **Typical workflows chain TOPP tools**: e.g., `FeatureFinderMetabo` (detect LC-MS features) → `FeatureLinkerUnlabeledKD` (align features across runs) → custom Python post-processing
-- **Proteomics** focuses on peptide/protein identification and quantification (tools like `MSGFPlusAdapter`, `FidoAdapter`, `ProteinQuantifier`)
-- **Metabolomics** focuses on feature detection, annotation, and statistical analysis (tools like `FeatureFinderMetabo`, `MetaboliteAdductDecharger`, `SiriusAdapter`)
-- **pyOpenMS** provides Python bindings for programmatic MS data access — reading mzML files, manipulating spectra/chromatograms, computing molecular properties, etc.
-- **MS-specific visualizations**: mass spectra (m/z vs intensity), chromatograms (RT vs intensity), peak maps (RT vs m/z 2D heatmaps), isotope patterns, fragment ion annotations, volcano plots for differential expression
+- **Inputs:** MaxQuant `txt` output (the PTXQC-relevant files: `evidence.txt`, `msms.txt`, `summary.txt`, `parameters.txt`, `proteinGroups.txt`, `msmsScans.txt`, `mqpar.xml`) uploaded either as a whole folder or as individual files; **or** a single OpenMS `mzTab` file.
+- **Output:** a self-contained PTXQC HTML report (plus PDF, the resolved YAML config, and a log), surfaced for in-page viewing and download.
+- **Configuration** mirrors PTXQC-web's advanced settings: ~13 numeric/selection thresholds (ID-rate bands, protein/peptide count targets, mass-error tolerances, match-between-runs, ion-injection time…), a free-text contaminants field (`NAME: percent; …`), and a metric on/off multiselect. Power users can instead upload a full PTXQC **YAML** config that overrides the manual settings.
+- **pyOpenMS** is a dependency (the template imports it; `mzTab` is an OpenMS format) but the QC computation is done by PTXQC in R, not by pyOpenMS.
 
 ## Repo-Local Task Playbooks — check `.claude/skills/` first
 
-This repo ships **step-by-step guides for the common development tasks** in `.claude/skills/*.md`. These encode the project's exact conventions (file locations, registration steps, schema rules, deployment specifics). **Before doing any of these tasks from scratch, read the matching guide** — it is more authoritative and detailed than this overview:
+This repo ships **step-by-step guides for common template development tasks** in `.claude/skills/*.md`. They encode the framework's exact conventions (file locations, registration steps, schema rules, deployment specifics). They are written for the generic template — this app currently uses **no** presets and **no** Python tools — but they remain the authoritative way to add those things. **Before doing any of these tasks from scratch, read the matching guide:**
 
 | Task | Guide |
 |------|-------|
@@ -45,158 +41,125 @@ Each guide ends with a checklist. The deployment guides describe an interview-dr
 ## Architecture
 
 ```
-app.py                          # Entry point — registers pages via st.Page() in a dict keyed by sidebar section
-settings.json                   # App config: name, version, deployment mode, workspaces, threading, analytics
-default-parameters.json         # Default workspace parameters (tracked via widget keys)
-presets.json                    # Parameter presets for TOPP workflows (per-workflow named parameter sets)
-content/                        # Streamlit pages (one .py per page) — the 5 example sections in app.py live here
+app.py                          # Entry point — registers the 4 PTXQC pages + Info pages via st.Page();
+                                #   reveals a hidden "Admin > Logfile" page when ?logfile is in the URL
+settings.json                   # App config (name, version, deployment mode, workspaces, threading, analytics).
+                                #   Committed as LOCAL mode + "test": true; the Dockerfile flips online_deployment=true
+default-parameters.json         # Global widget defaults only: {"image-format": "svg", "controllo": false}.
+                                #   PTXQC parameters are workflow-scoped (defined in src/Workflow.py), NOT here
+presets.json                    # Empty ({}) — this app ships no presets. (Framework still supports them.)
+content/                        # Streamlit pages (one .py per nav entry)
+  ptxqc_upload.py               #   PTXQC workflow sections — each just calls wf.show_*_section()
+  ptxqc_configure.py
+  ptxqc_run.py
+  ptxqc_results.py
+  help.py, about.py             #   "Info" section pages
+  logfile.py                    #   hidden admin page: views the shared PTXQC usage log
 src/
+  Workflow.py                   # THE app: class Workflow(WorkflowManager) named "PTXQC". Wraps the PTXQC R
+                                #   package via `Rscript src/ptxqc_runner.R run ...` (run_command, not run_topp)
+  ptxqc_config.py               # Pure-Python helpers (no R knowledge): cached metric/version discovery via
+                                #   `ptxqc_runner.R default-config`, contaminants parsing, run-config assembly,
+                                #   usage-log read/write. Most functions are Streamlit-free so they run in the RQ worker
+  ptxqc_runner.R                # R subprocess wrapper: `default-config` (emit metric list + default YAML) and
+                                #   `run` (PTXQC::createReport -> HTML/PDF/YAML/log + a result JSON sidecar)
   common/
     common.py                   # Utilities: page_setup(), save_params(), show_fig(), show_table()
     captcha_.py                 # Captcha gate for online deployments
     admin.py                    # Admin auth + demo-workspace management
-  Workflow.py                   # Example WorkflowManager subclass (TOPP workflow)
-  python-tools/                 # Custom Python analysis scripts (each defines a DEFAULTS list for auto-UI)
-  fileupload.py, view.py, ...   # Page-specific logic for the pyOpenMS example pages
-  workflow/
-    WorkflowManager.py          # Base class: upload/configure/execution/results pattern
-    StreamlitUI.py              # Widget library: upload_widget, input_TOPP, input_python, preset_buttons, etc.
-    ParameterManager.py         # JSON parameter persistence + TOPP .ini generation + preset loading/applying
-    CommandExecutor.py          # Runs TOPP tools and Python scripts as subprocesses (parallel-capable)
-    FileManager.py              # Workspace file organization / output-path construction
-    Logger.py                   # Structured workflow logging
-    QueueManager.py             # Redis/RQ queue for online deployments
-    tasks.py, health.py         # RQ worker task definitions and health checks
-tests/                          # pytest unit + GUI tests (preset logic, queue cancel, workflow stop, ...)
-test_gui.py                     # Top-level GUI test module (run with tests/ by ci.yml)
+  workflow/                     # Generic template workflow framework (inherited)
+    WorkflowManager.py          #   Base class: upload/configure/execution/results pattern
+    StreamlitUI.py              #   Widget library: upload_widget, input_widget, input_TOPP, input_python, ...
+    ParameterManager.py         #   JSON parameter persistence + TOPP .ini generation + preset loading
+    CommandExecutor.py          #   Runs subprocesses — TOPP tools, Python scripts, OR arbitrary commands
+                                #     (run_command, used here for Rscript) — parallel-capable
+    FileManager.py, Logger.py, QueueManager.py, tasks.py, health.py, _log_status.py
+hooks/hook-analytics.py         # Build-time analytics patch (run during the Docker build)
+utils/                          # digest.py, fasta.py helpers
+assets/                         # Images (e.g. BSC.png)
+tests/                          # pytest unit/logic tests + an R-side parity check (see Test conventions)
+test_gui.py                     # Top-level AppTest GUI test — launches every page; CI runs it with tests/
 clean-up-workspaces.py          # Cron-style cleanup of stale workspace directories
-entrypoint.sh, docker/          # Container entrypoint (auto-detects read-only root for apptainer/HPC)
+docker/entrypoint.sh            # Canonical container entrypoint (copied to /app/entrypoint.sh in the image);
+entrypoint.sh                   #   auto-detects a read-only root (apptainer/HPC) and moves runtime state to /tmp
 gdpr_consent/                   # GDPR consent Streamlit component (prebuilt JS bundle)
-docs/                           # User/developer guides, deployment docs
-k8s/                            # Kubernetes deployment: base manifests + Kustomize overlays/components
-  base/                         #   streamlit + rq-worker deployments, redis, PVC, ingress, cleanup cronjob
-  overlays/prod/                #   per-fork Kustomize overlay (slug, image, ingress hostnames, memory tier)
-  components/memory-tier-{low,high}/  # node-selector + resource components selected by the overlay
-Dockerfile_simple               # pyOpenMS + R/PTXQC image (amd64)
-docker-compose.yml              # Local/standalone deployment config
-.streamlit/                     # Streamlit config + secrets template
+docs/                           # User/developer + deployment docs
+k8s/                            # Kustomize: base/ + components/memory-tier-{low,high}/ + overlays/prod/
+Dockerfile_simple               # The single shipped image (linux/amd64): pyOpenMS (pip) + R + PTXQC + pandoc
+docker-compose.yml              # Standalone deployment config
 ```
 
 ## Key Patterns
 
 ### Pages
 
-Every page starts with `page_setup()` which handles workspace initialization, sidebar rendering, and parameter loading:
+Every page starts with `page_setup()` (workspace init, sidebar, parameter loading). The PTXQC content pages are deliberately thin — they instantiate the workflow and delegate to it:
 
 ```python
-from src.common.common import page_setup, save_params
-params = page_setup()
+from src.common.common import page_setup
+from src.Workflow import Workflow
+
+page_setup()
+wf = Workflow()
+wf.show_execution_section()   # or show_upload_section / show_configure_section / show_results_section
 ```
 
-Pages are registered in `app.py` under named sidebar sections (the dict key is the section header):
+Pages are registered in `app.py` under named sidebar sections (the dict key is the section header). The section header here is the app name from `settings.json`. A hidden Admin section is appended only when `?logfile` is in the URL query (parity with PTXQC-web's usage log).
 
-```python
-pages = {
-    "Section Name": [
-        st.Page(Path("content", "my_page.py"), title="My Page", icon="🔬"),
-    ],
-}
-```
+### The PTXQC Workflow (`src/Workflow.py`)
+
+The whole app is one `WorkflowManager` subclass implementing the four template methods. This is the example to copy when changing app behavior:
+
+- `upload()` — a reactive **Data type** selector (`MaxQuant directory` / `MaxQuant files` / `mzTab file`) drives which `self.ui.upload_widget(...)` is shown (folder upload vs. multi-file vs. single).
+- `configure()` (`@st.fragment`) — either an "upload a YAML config" path, or the manual advanced-settings grid built from the module-level `NUMBER_WIDGETS` list + a contaminants text field + a metrics multiselect populated from the installed PTXQC version. Degrades gracefully (a warning, defaults only) when R/PTXQC is unavailable.
+- `execution()` — gathers inputs, writes a JSON run-config (via `ptxqc_config.build_run_config`), then runs **R**: `self.executor.run_command(["Rscript", cfg.RUNNER, "run", "--config", ..., "--in", ..., "--type", "maxquant"|"mztab", "--out", ...])`. Appends a row to the shared usage log afterward.
+- `results()` (`@st.fragment`) — reads the wrapper's `ptxqc_result.json`, embeds the report HTML via `st.components.v1.html(...)` (with an injected "open in new tab" button), and offers PDF/HTML/YAML/log downloads.
+
+Note: this app uses `run_command` (arbitrary subprocess) rather than the template's `run_topp` / `run_python`. The framework supports all three — see `.claude/skills/create-workflow.md` for the `self.file_manager` / `self.executor` / `self.logger` API surface.
 
 ### Parameters
 
-Parameters are tracked via widget keys that match entries in `default-parameters.json`. The `save_params(params)` call at the end of a page persists any widget state changes:
+Template parameters are tracked via widget keys. `default-parameters.json` holds only the two **global** UI defaults (`image-format`, `controllo`). The PTXQC-specific parameters are **workflow-scoped**: declared with `self.ui.input_widget(key, default=..., widget_type=...)` in `configure()`, persisted by `ParameterManager` under a `param_prefix`, and read back in `execution()` via `self.params`. `ptxqc_config.PARAM_DEFAULTS` provides fallbacks so a report still runs if the user never opens the configure page. Keep `NUMBER_WIDGETS` (in `Workflow.py`) and `PARAM_DEFAULTS` (in `ptxqc_config.py`) in sync.
 
-```python
-params = page_setup()
-st.number_input("X", value=params["my-param"], key="my-param")
-save_params(params)
-```
+### R wrapper contract (`src/ptxqc_runner.R`)
 
-### TOPP Workflows (WorkflowManager)
+Two subcommands, both invoked as `Rscript src/ptxqc_runner.R <cmd> ...` from Python:
+- `default-config --out <yaml>` → writes the version-correct default YAML and a `<yaml>.json` sidecar (`{version, metrics:[{id,name}]}`). `ptxqc_config.get_ptxqc_metadata()` caches this (via `@st.cache_data`) to populate the UI without hardcoding anything PTXQC-version-specific.
+- `run --config <json> --in <path> --type maxquant|mztab --out <dir>` → builds the YAML from the payload, runs `createReport`, and writes outputs + a `ptxqc_result.json` (`{version, html, pdf, yaml, log, error}`).
 
-Complex workflows subclass `WorkflowManager` and implement 4 methods:
-- `upload()` — file upload widgets via `self.ui.upload_widget()`
-- `configure()` — TOPP params via `self.ui.input_TOPP()`, Python tool params via `self.ui.input_python()`
-- `execution()` — run tools via `self.executor.run_topp()` and `self.executor.run_python()`
-- `results()` — display outputs
+`ptxqc_config.py` is the only Python that knows the payload shape; it forwards just the keys in `PARAM_KEYS` and reproduces PTXQC-web's coupling (`param_EV_intThresh = param_EV_protThresh`).
 
-Each workflow gets 4 content pages (upload, configure, run, results) that call `wf.show_*_section()`. Decorate `configure()` and `results()` with `@st.fragment` for partial reruns. See `.claude/skills/create-workflow.md` for the full template and the `self.file_manager` / `self.executor` / `self.logger` API surface; `src/Workflow.py` is the in-repo example.
+### Python Tools & Presets (framework features, not used here)
 
-### Python Tools
-
-Custom scripts in `src/python-tools/` define a `DEFAULTS` list for auto-generated UI. Always include hidden `in`/`out` keys; the value type drives the widget (bool→checkbox, str+`options`→selectbox, number→number_input):
-
-```python
-DEFAULTS = [
-    {"key": "in", "value": [], "hide": True},
-    {"key": "my-param", "value": 5, "name": "My Parameter", "help": "Description",
-     "min": 1, "max": 100, "step_size": 1, "widget_type": "slider"},
-]
-```
-
-Wire into a workflow with `self.ui.input_python("tool_name")` (configure) and `self.executor.run_python("tool_name", {"in": files})` (execution). Full metadata-key table in `.claude/skills/add-python-tool.md`.
-
-### Presets
-
-Parameter presets in `presets.json` map workflow names (lowercase, hyphens) to named parameter sets. Keys starting with `_` are metadata, not applied as tool params. The workflow key must match the `WorkflowManager("Display Name", ...)` name lowercased-and-hyphenated:
-
-```json
-{
-  "workflow-name": {
-    "Preset Name": {
-      "_description": "Tooltip text",
-      "TOPPToolName": {"algorithm:section:param": value},
-      "_general": {"custom-widget-key": value}
-    }
-  }
-}
-```
+There is **no `src/python-tools/`** directory and `presets.json` is **empty (`{}`)** — this app uses neither. Both remain first-class template capabilities: wire a Python tool with `self.ui.input_python(...)` / `self.executor.run_python(...)` (see `.claude/skills/add-python-tool.md`), and add presets keyed by the lowercase-hyphenated workflow name (here that would be `ptxqc`) following `.claude/skills/add-presets.md`.
 
 ## Configuration & Deployment Modes (`settings.json`)
 
-`settings.json` controls runtime behavior — far more than just name/version:
+`settings.json` controls runtime behavior far beyond name/version:
 
-- `online_deployment` — `false` = local mode (single user, direct execution); `true` = hosted mode (multi-user workspaces, captcha gate via `src/common/captcha_.py`, Redis/RQ job queue via `QueueManager`).
-- `enable_workspaces` — per-user workspaces with unique shareable IDs (persistent params + uploaded files).
-- `test` — test/CI flag; bypasses captcha so `streamlit.testing` AppTest runs can drive the app headlessly.
-- `workspaces_dir` / `local_data_dir` — where workspaces live; `local_data_dir` (default `/mounted-data` in Docker) enables an in-app file-tree browser for a bind-mounted host directory.
-- `demo_workspaces` — seedable read-only example workspaces (`example-data/workspaces/`).
-- `max_threads` — `{local, online}` caps on TOPP parallelism.
+- `online_deployment` — `false` = local mode (single user, direct execution); `true` = hosted mode (multi-user workspaces, captcha gate via `src/common/captcha_.py`, Redis/RQ job queue via `QueueManager`). **The committed file is `false`; `Dockerfile_simple` flips it to `true` at build time (`jq '.online_deployment = true'`).** So the shipped image runs in online/queued mode.
+- `test` — committed as `true`; bypasses captcha so `streamlit.testing` AppTest runs (and `test_gui.py`) can drive the app headlessly.
+- `enable_workspaces` — per-user workspaces with unique shareable IDs (persistent params + uploaded files). `workspaces_dir` is `..` here (workspaces live beside the app dir).
+- `local_data_dir` — when set (the Docker image defaults it to `/mounted-data`), a bind-mounted host directory becomes browsable in the upload widget; selected files are referenced in place via `external_files.txt` (no copy), so the mount can be read-only.
+- `demo_workspaces` — seedable read-only example workspaces from `example-data/workspaces/` (the dir ships empty, just a `.gitkeep`).
+- `max_threads` — `{local: 4, online: 2}` caps on subprocess parallelism.
 - `queue_settings` — RQ job timeout / result TTL for online mode.
-- `analytics` — Google Analytics / Piwik / Matomo toggles.
+- `analytics` — Matomo is enabled (OpenMS Matomo cloud); Google Analytics / Piwik are off. `hooks/hook-analytics.py` patches analytics into the build.
 
-**Deployment paths:** `docker-compose.yml` (standalone), `k8s/` Kustomize overlays (OpenMS production cluster, Traefik ingress + Redis + RQ worker + workspace PVC), and apptainer/Singularity SIFs for HPC (the entrypoint auto-switches runtime state to `/tmp` under a read-only root). CI builds amd64+arm64 multi-arch images and publishes SIFs to GHCR.
+The shared **usage log** (`ptxqc_usage.log`) is written at the workspaces root — outside any single workspace, so the cleanup cron never deletes it — and is viewed via the hidden `?logfile` admin page.
 
-## Visualization Libraries
+**Deployment paths:** `docker-compose.yml` (standalone), `k8s/` Kustomize overlays (`overlays/prod/` selects a memory-tier component and sets slug/image/ingress; Traefik IngressRoute + Redis + RQ worker + workspace PVC), and apptainer/Singularity SIFs for HPC (the entrypoint auto-switches runtime state to `/tmp` under a read-only root).
 
-Two libraries are commonly used in template-based apps for MS data visualization. See `.claude/skills/add-visualization.md` for a use-case decision table and cross-component linking patterns.
+## Visualization
 
-### pyopenms-viz
+The QC report itself is a **self-contained PTXQC HTML document** produced by R and embedded with `st.components.v1.html` — not built from a Python plotting library. (Streamlit's static file serving returns `text/plain` + nosniff for `.html`, so the report is embedded inline rather than linked; a small injected button pops it into a new tab via a `blob:` URL.)
 
-Pandas DataFrame extension for MS visualization. Use the plotly backend in Streamlit, and `show_fig()` for consistent display/download:
+For *additional* MS visualizations you might add, the template's two options are available — though only the first is installed here:
 
-```python
-import pyopenms_viz
-df.plot.ms_spectrum(backend="plotly")  # mass spectrum (m/z vs intensity)
-df.plot.peak_map(backend="plotly")     # 2D peak map (RT vs m/z heatmap)
-df.plot.chromatogram(backend="plotly") # chromatogram (RT vs intensity)
-df.plot.mobilogram(backend="plotly")   # ion mobility trace
-```
+- **pyopenms-viz** (in `requirements.txt`): pandas DataFrame extension — `df.plot.ms_spectrum/peak_map/chromatogram/mobilogram(backend="plotly")`. Use `show_fig()` for consistent display/download. Best for publication-quality plots on small–medium data.
+- **OpenMS-Insight** (NOT currently a dependency): Vue.js-backed components (`Table`, `LinePlot`, `Heatmap`, `VolcanoPlot`, `SequenceView`) for large datasets with server-side pagination and cross-component linking via a shared `link_id`. Add it to dependencies first.
 
-Best for: publication-quality static/interactive plots, small-medium datasets, standard MS plot types.
-
-### OpenMS-Insight (t0mdavid-m/openms-insight)
-
-Vue.js-backed interactive Streamlit components for large MS datasets:
-
-- `Table` — server-side pagination with Tabulator.js
-- `LinePlot` — stick-style mass spectra via Plotly
-- `Heatmap` — 2D scatter handling millions of points
-- `VolcanoPlot` — differential expression visualization
-- `SequenceView` — peptide sequence with fragment ion matching
-
-Components cross-link via a shared `link_id` column. Best for: large datasets (millions of points), cross-component interactivity, server-side pagination.
+See `.claude/skills/add-visualization.md` for the decision table and linking patterns.
 
 ## Commands
 
@@ -204,9 +167,10 @@ Components cross-link via a shared `link_id` column. Best for: large datasets (m
 # --- Run locally ---
 pip install -r requirements.txt
 streamlit run app.py
-# NOTE: local pip install gives pyOpenMS only — it does NOT install R/PTXQC, so the
-# PTXQC report step degrades gracefully. Use the Docker image (Dockerfile_simple) for a
-# full run with R + PTXQC. See README "Run Locally" caveat.
+# CAVEAT: local pip install gives pyOpenMS only — it does NOT install R or the PTXQC
+# package. ptxqc_config.get_ptxqc_metadata() then reports unavailable and the app
+# degrades gracefully (configure page warns; the live metric list is empty; running a
+# report fails). For a full run with R + PTXQC, use the Docker image (Dockerfile_simple).
 
 # --- Tests (pytest) ---
 # requirements.txt does NOT include the test deps; install them first:
@@ -220,26 +184,37 @@ pip install pylint
 pylint $(git ls-files '*.py') --errors-only \
   --disable=C0103,C0114,C0301,C0411,W0212,W0631,W0602,W1514,W2402,E0401,E1101,F0001,R1732
 
-# --- Docker ---
+# --- Docker (the only shipped image; linux/amd64) ---
 docker-compose up --build                     # standalone
-# Image (pyOpenMS + R/PTXQC): Dockerfile_simple (amd64)
+# Build directly (needs a GitHub token + outbound network for the R/PTXQC install step):
+docker build -f Dockerfile_simple --build-arg GITHUB_TOKEN=<token> -t ptxqc:latest .
 ```
 
 ### Test conventions
 
-Two distinct test styles live side by side — match the one that fits:
+Three styles live side by side — match the one that fits:
 
-- **GUI tests** drive a page headlessly with `streamlit.testing.v1.AppTest` (e.g. `AppTest.from_file("content/simple_workflow.py").run()`), then assert on `app.number_input`, `app.session_state`, `app.dataframe`, etc. (see `tests/test_simple_workflow.py`).
-- **Unit tests** isolate logic from Streamlit by mocking `streamlit` in `sys.modules` *before* importing the module under test, so `st.session_state` is a plain dict (see the header of `tests/test_parameter_presets.py`). Queue/worker tests use `fakeredis`.
+- **GUI tests** (`test_gui.py`) drive each page headlessly with `streamlit.testing.v1.AppTest.from_file(...)`, inject `settings` + a `test` workspace into session state, run, and assert `not app.exception`. The parametrized `test_launch` launches all six pages (the 4 PTXQC pages + help + about) and verifies they render even though **R/PTXQC is absent in CI** (the graceful-degradation contract).
+- **Pure-logic unit tests** (`tests/test_ptxqc_config.py`) import `src.ptxqc_config` directly and exercise the R-free helpers: contaminants parser, run-config assembly (incl. the intensity/protein-threshold coupling), usage-log round-trip.
+- **Streamlit-mocked unit tests** (`tests/test_parameter_presets.py`) mock `streamlit` in `sys.modules` *before* importing the module under test, so `st.session_state` is a plain dict. Queue/worker tests (`test_queue_manager_cancel.py`) use `fakeredis`. `test_workflow_manager_stop.py` and `test_log_status.py` cover workflow control + logging.
+- `tests/ptxqc_yaml_parity.R` is an **R-side** parity check (not run by pytest) asserting the generated YAML matches PTXQC-web's.
 
-CI: `ci.yml` runs lint + `python -m pytest test_gui.py tests/`; `pylint.yml` runs the lint command above; `build-and-test.yml` builds multi-arch images and exercises apptainer + kind (nginx/Traefik) deployments.
+**CI workflows:**
+- `ci.yml` — installs `requirements.txt` + `pytest fakeredis`, runs `python -m pytest test_gui.py tests/` (Ubuntu, Python 3.10 to match the image).
+- `pylint.yml` — the lint command above.
+- `build-and-test.yml` — validates k8s manifests (kubeconform), builds the **single linux/amd64** `simple` image, health-checks it under **apptainer** (read-only root, host UID, bind-mount contract) then publishes the SIF to GHCR via ORAS, and exercises **kind**-based **nginx** and **Traefik** k8s deploys against both ingress hostnames.
+- `ghcr-cleanup.yml` — prunes old GHCR images.
+
+> History note: arm64 multi-arch images and the standalone Windows executable build were intentionally dropped; the repo now ships **one amd64 image**. Don't reintroduce them without a reason.
 
 ## Conventions
 
-- Page files go in `content/`, source logic in `src/`
-- Widget keys must match parameter keys in `default-parameters.json`
-- Workflow names use lowercase with hyphens: "My Workflow" -> "my-workflow" (this is the `presets.json` key and params lookup key)
-- Use `show_fig()` and `show_table()` from `src/common/common.py` for consistent display
-- Use `@st.fragment` on methods that should partially rerun (configure, results)
-- TOPP tool parameters use colon-separated paths: `"algorithm:section:param_name"`
-- For repeatable tasks (new page, workflow, tool, preset, deployment), follow the matching `.claude/skills/*.md` guide and its checklist
+- Page files go in `content/`, source logic in `src/`.
+- Widget keys must match parameter keys (global defaults in `default-parameters.json`; workflow params declared via `input_widget`).
+- Workflow names use lowercase with hyphens: `"PTXQC"` -> `ptxqc` (the `presets.json` key and params lookup key).
+- Keep `NUMBER_WIDGETS` (`src/Workflow.py`) and `PARAM_DEFAULTS` (`src/ptxqc_config.py`) in sync; the parameter names mirror PTXQC-web's `param$...` keys.
+- Use `show_fig()` and `show_table()` from `src/common/common.py` for consistent display.
+- Use `@st.fragment` on methods that should partially rerun (`configure`, `results`).
+- TOPP tool parameters (if you add a TOPP workflow) use colon-separated paths: `"algorithm:section:param_name"`.
+- For repeatable tasks (new page, workflow, tool, preset, deployment), follow the matching `.claude/skills/*.md` guide and its checklist.
+```
